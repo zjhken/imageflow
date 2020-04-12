@@ -1,20 +1,16 @@
 extern crate clap;
 extern crate imageflow_server;
 
+extern crate actix_web;
+use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 
-use clap::{App, Arg, SubCommand, AppSettings};
+use std::io;
+
+use clap::{ Arg, SubCommand, AppSettings};
 use imageflow_server::preludes::*;
 use std::path::{Path, PathBuf};
-
 use std::net::ToSocketAddrs;
-
 extern crate imageflow_types as s;
-
-fn main() {
-    let exit_code = main_with_exit_code();
-    std::process::exit(exit_code);
-}
-
 
 fn parse_mount(s: &str) -> std::result::Result<MountLocation, String>{
     //Escape ::
@@ -26,9 +22,10 @@ fn parse_mount(s: &str) -> std::result::Result<MountLocation, String>{
     }
 }
 
-fn main_with_exit_code() -> i32 {
+#[actix_rt::main]
+async fn main() -> io::Result<()> {
     let version = s::version::one_line_version();
-    let app = App::new("imageflow_server").version(version.as_ref())
+    let app = clap::App::new("imageflow_server").version(version.as_ref())
         .setting(AppSettings::VersionlessSubcommands).setting(AppSettings::SubcommandRequiredElseHelp)
         .subcommand(
             SubCommand::with_name("diagnose").setting(AppSettings::ArgRequiredElseHelp)
@@ -80,14 +77,14 @@ fn main_with_exit_code() -> i32 {
             println!("{}\n{}\n",
                      s::version::one_line_version(),
                      s::version::all_build_info_pairs());
-            return 0;
+            std::process::exit(0);
         }
         if m.is_present("call-panic") {
             panic!("Panicking on command");
         }
         if m.is_present("smoke-test-core") {
             ::imageflow_server::diagnose::smoke_test_core();
-            return 0;
+            std::process::exit(0);
         }
     }
     if let Some(matches) = matches.subcommand_matches("start") {
@@ -169,32 +166,30 @@ fn main_with_exit_code() -> i32 {
             }
 
             println!("{}",&version);
-            ::imageflow_server::serve(StartServerConfig {
+            return ::imageflow_server::serve(StartServerConfig {
                 bind_addr: combined,
                 data_dir: data_dir.unwrap_or_else(|| { if !alt_data_dir.exists() { std::fs::create_dir_all(&alt_data_dir).unwrap(); } alt_data_dir }),
                 default_cache_layout: Some(FolderLayout::Tiny),
-                integration_test: integration_test,
-                mounts: mounts,
-                cert: cert,
+                integration_test,
+                mounts,
+                cert,
                 cert_pwd: m.value_of("cert-pwd").map(|s| s.into()),
-            });
+            }).await;
         }else {
             let mounts = m.values_of_lossy("mount").expect("at least one --mount required").into_iter().map(|s| parse_mount(&s).expect("validator not working - bug in clap?")).collect::<Vec<MountLocation>>();
 
             println!("{}",&version);
-            ::imageflow_server::serve(StartServerConfig {
+            return ::imageflow_server::serve(StartServerConfig {
                 bind_addr: combined,
                 data_dir: data_dir.expect("data-dir required"),
-                mounts: mounts,
+                mounts,
                 default_cache_layout: Some(FolderLayout::Normal),
-                integration_test: integration_test,
-                cert: cert,
+                integration_test,
+                cert,
                 cert_pwd: m.value_of("cert-pwd").map(|s| s.into()),
-            });
+            }).await;
         }
-        return 0;
     }
-
-    64
+    std::process::exit(64);
 }
 

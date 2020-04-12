@@ -98,7 +98,7 @@ impl CacheFolder{
                 FolderLayout::Normal => 64 * 64 * 2 + 64,
                 FolderLayout::Huge => 64 * 64 * 16 + 64 * 64 + 64,
             },
-            write_layout: write_layout
+            write_layout
         }
     }
 

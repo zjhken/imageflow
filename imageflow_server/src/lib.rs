@@ -1,7 +1,5 @@
 
-extern crate iron;
-extern crate persistent;
-extern crate router;
+extern crate actix_web;
 extern crate logger;
 
 extern crate bincode;
@@ -12,7 +10,6 @@ use staticfile::Static;
 
 #[macro_use] extern crate serde_derive;
 
-extern crate staticfile;
 extern crate rustc_serialize;
 extern crate hyper;
 
@@ -25,10 +22,6 @@ extern crate hyper_native_tls;
 use hyper_native_tls::NativeTlsServer;
 
 use std::sync::atomic::AtomicUsize;
-
-
-extern crate conduit_mime_types as mime_types;
-
 use regex::Regex;
 
 extern crate imageflow_helpers;
@@ -59,16 +52,11 @@ pub mod preludes {
 }
 
 
-use iron::mime::*;
-use iron::prelude::*;
-use iron::status;
-use router::Router;
-
-
-
+use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 
 
 use time::precise_time_ns;
+use std::env;
 
 #[cfg_attr(feature = "cargo-clippy", allow(useless_attribute))]
 #[allow(unused_imports)]
@@ -83,8 +71,6 @@ struct SharedData {
     requests_received: AtomicUsize,
     //detailed_errors: bool
 }
-
-impl iron::typemap::Key for SharedData { type Value = SharedData; }
 
 
 // Todo: consider lru_cache crate
@@ -386,13 +372,14 @@ fn ir4_framewise(_info: &s::ImageInfo, url: &url::Url) -> std::result::Result<s:
 }
 
 
-type EngineHandler<T> = fn(req: &mut Request, engine_data: &T, mount: &MountLocation) -> IronResult<Response>;
+type EngineHandler<T> = fn(req: &HttpRequest, engine_data: &T, mount: &MountLocation) -> impl Responder;
 type EngineSetup<T> = fn(mount: &MountLocation) -> Result<(T, EngineHandler<T>), String>;
 
 
 fn ir4_local_respond<F>(_: &SharedData, source: &Path, framewise_generator: F) -> IronResult<Response>
     where F: Fn(s::ImageInfo) -> std::result::Result<s::Framewise, ServerError>
 {
+
     respond_using(&source, || fetch_bytes_from_disk(source), framewise_generator)
 }
 
@@ -433,22 +420,7 @@ fn ir4_local_setup(mount: &MountLocation) -> Result<(PathBuf, EngineHandler<Path
     }
 }
 
-fn static_setup(mount: &MountLocation) -> Result<(Static, EngineHandler<Static>), String> {
-    if mount.engine_args.len() < 1 {
-        Err("static requires at least one argument - the path to the physical folder it is serving".to_owned())
-    } else {
-        //TODO: validate path
-        let path = Path::new(&mount.engine_args[0]).canonicalize().map_err(|e| format!("{:?}", e))?;
-        let h = if mount.engine_args.len() > 1 {
-            panic!("Static file cache headers not yet supported") //(we must compile staticfile with the 'cache' feature enabled)
-//            let mins = mount.engine_args[1].parse::<i64>().expect("second argument to static must be the number of minutes to browser cache for");
-//            Static::new(path).cache(Duration::minutes(mins))
-        } else {
-            Static::new(path)
-        };
-        Ok((h, static_handler))
-    }
-}
+
 
 //Function is passed as generic trait (generic over 2nd arg), thus &String
 #[cfg_attr(feature = "cargo-clippy", allow(ptr_arg))]
@@ -565,26 +537,103 @@ fn mount<T>(mount: MountLocation, mou: &mut mount::Mount, setup: EngineSetup<T>)
 }
 
 
-pub fn serve(c: StartServerConfig) {
+
+pub async fn serve(c: StartServerConfig) -> io::Result<()>{
+    env::set_var("RUST_LOG", "actix_web=debug,actix_server=info");
     env_logger::init();
 
-    let shared_data = SharedData {
+    let app_data = web::Data::new(SharedData {
         source_cache: CacheFolder::new(c.data_dir.join(Path::new("source_cache")).as_path(), c.default_cache_layout.unwrap_or(FolderLayout::Normal)),
         output_cache: CacheFolder::new(c.data_dir.join(Path::new("output_cache")).as_path(), c.default_cache_layout.unwrap_or(FolderLayout::Normal)),
         requests_received: AtomicUsize::new(0) //NOT YET USED
-    };
+    });
+
+    let server = HttpServer::new(move || {
+        // move app_data into the closure
+        let mut app = App::new()
+            .app_data(app_data.clone()) // <- register the created data
+            ;
+
+        //Validate arguments
+        for m in c.mounts {
+            if let Err(e) = m.engine.validate_args_present(&m){
+                panic!("Failed to mount {} using engine {} ({:?})\n({:?})\nCurrent dir: {:?}", &m.prefix, &m.engine.to_id(), &m, e, std::env::current_dir())
+            }
+        }
+
+        // Mount prefix (external) (url|relative path)
+        // pass through static files (whitelisted??)
+        for m in c.mounts {
+            let copy = m.clone();
+            let mount_result = match m.engine {
+                //MountedEngine::Ir4Https => "ir4_https",
+                MountedEngine::Ir4Http => {
+                    let prefix = m.engine.get_first_arg(&copy).unwrap();
+                    let regex = format!("{}\\{path:.*\\}", prefix);
+                    app = app.service(web::resource(regex).route(web::get().to(
+
+                    )));
+                                  app.route(&arg,
+                    let url: url::Url = req.url.clone().into();
+                    let shared = req.get::<persistent::Read<SharedData>>().unwrap();
+                    //TODO: Ensure the combined url is canonical (or, at least, lacks ..)
+                    let remote_url = format!("{}{}", base_url, &url.path()[1..]);
+
+                    ir4_http_respond(&shared, &remote_url, move |info: s::ImageInfo| {
+                        ir4_framewise(&info, &url)
+                    })
+
+                    )
+
+                } ir4_http_setup),
+                MountedEngine::Ir4ProxyUncached => mount(m, &mut mou, ir4_http_uncached_setup),
+                MountedEngine::Ir4Local => mount(m, &mut mou, ir4_local_setup),
+                MountedEngine::PermacacheProxy => mount(m, &mut mou, permacache_proxy_setup),
+                MountedEngine::PermacacheProxyGuessContentTypes => mount(m, &mut mou, permacache_proxy_guess_content_types_setup),
+                MountedEngine::Static => {
+                    app = app.service(
+                        fs::Files::new("/static", ".")
+                            .show_files_listing()
+                            .use_last_modified(true),
+                    )
+                    mou.mount(&m.prefix, static_setup(&m).expect("Failed to mount static directory").0);
+                    Ok(())
+                },
+            };
+            if let Err(e) = mount_result{
+
+                panic!("Failed to mount {} using engine {} ({:?})\n({:?})\nCurrent dir: {:?}", &copy.prefix, &copy.engine.to_id(), &copy, e, std::env::current_dir())
+            }
+        }
+        if c.integration_test {
+            app = app.
+            router.get("/test/shutdown", move |_: &mut Request| -> IronResult<Response> {
+                println!("Stopping server due to GET /test/shutdown");
+                std::process::exit(0);
+
+                //            Ok(Response::with((Mime::from_str("text/plain").unwrap(),
+                //                               status::InternalServerError,
+                //                               bytes)))
+            }, "test-shutdown");
+        }
+        app
+    });
+
 
     let mut mou = mount::Mount::new();
     let mut router = Router::new();
 
     // Mount prefix (external) (url|relative path)
     // pass through static files (whitelisted??)
-
     for m in c.mounts {
         let copy = m.clone();
         let mount_result = match m.engine {
             //MountedEngine::Ir4Https => "ir4_https",
-            MountedEngine::Ir4Http => mount(m, &mut mou, ir4_http_setup),
+            MountedEngine::Ir4Http => {
+                app = app
+            }
+
+                mount(m, &mut mou, ir4_http_setup),
             MountedEngine::Ir4ProxyUncached => mount(m, &mut mou, ir4_http_uncached_setup),
             MountedEngine::Ir4Local => mount(m, &mut mou, ir4_local_setup),
             MountedEngine::PermacacheProxy => mount(m, &mut mou, permacache_proxy_setup),
@@ -635,6 +684,15 @@ pub fn serve(c: StartServerConfig) {
     }else{
         Iron::new(chain).http(c.bind_addr.as_str()).unwrap();
     }
+    HttpServer::new(|| {
+        App::new()
+            .configure(config_app)
+            .wrap(middleware::Logger::default())
+    }).
+        .bind("127.0.0.1:8080")?
+        .run()
+        .await
+
 }
 
 
@@ -672,6 +730,28 @@ impl MountedEngine {
             //"ir4_https" => Some(MountedEngine::Ir4Https),
             _ => None
         }
+    }
+
+    pub fn validate_args_present(&self, mount: &MountLocation) -> Result<(),String> {
+        if mount.engine_args.len() < 1 {
+            return match self {
+                MountedEngine::Ir4Http | MountedEngine::Ir4ProxyUncached | MountedEngine::PermacacheProxy
+                | MountedEngine::PermacacheProxyGuessContentTypes =>
+                    Err(format!("{} requires at least one argument - the base url to suffix paths to", self.to_id())),
+                MountedEngine::Ir4Local | MountedEngine::Static =>
+                    Err(format!("{} requires at least one argument - the path to the physical folder it is serving", self.to_id()))
+            };
+        }
+        Ok(())
+    }
+
+    pub fn get_first_arg_as_canonical_path(&self, mount: &MountLocation) -> Result<PathBuf,String> {
+        self.validate_args_present(mount)?;
+        Path::new(&mount.engine_args[0]).canonicalize().map_err(|e| format!("{:?} for {:?}", e, &mount.engine_args[0]))
+    }
+    pub fn get_first_arg(&self, mount: &MountLocation) -> Result<String,String> {
+        self.validate_args_present(mount)?;
+        Ok(mount.engine_args[0].to_owned())
     }
 
     pub fn id_values() -> &'static [&'static str] {
