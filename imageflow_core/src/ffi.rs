@@ -84,7 +84,6 @@ pub struct ImageflowContext {
     pub underlying_heap: Heap,
     pub log: ProfilingLog,
     pub object_tracking: ObjTrackingInfo,
-    pub codec_set: *mut ContextCodecSet,
 }
 
 // end reuse
@@ -550,13 +549,6 @@ pub struct ObjTrackingInfo {
 }
 
 
-#[repr(C)]
-#[derive(Clone,Debug,PartialEq)]
-pub struct DecoderFrameInfo{
-    pub w: i32,
-    pub h: i32,
-    pub format: PixelFormat
-}
 
 // TODO: find a way to distinguish between (rust/c) context and IO types here
 
@@ -582,66 +574,6 @@ type IoSeekFn = extern fn(*mut ImageflowContext, *mut ImageflowJobIo, i64) -> bo
 
 
 
-type CodecInitializeFn = extern fn(*mut ImageflowContext, *mut CodecInstance) -> bool;
-
-type CodecGetInfoFn = extern fn(*mut ImageflowContext, codec_state: *mut c_void, info_out: *mut DecoderInfo) -> bool;
-
-type CodecSwitchFrameFn = extern fn(*mut ImageflowContext, codec_state: *mut c_void, frame_index: size_t) -> bool;
-
-type CodecGetFrameInfoFn = extern fn(*mut ImageflowContext, codec_state: *mut c_void, info_out: *mut DecoderFrameInfo) -> bool;
-
-type CodecSetDownscaleHintsFn = extern fn(*mut ImageflowContext, *mut CodecInstance, *const DecoderDownscaleHints ) -> bool;
-
-
-type CodecReadFrameFn = extern fn(*mut ImageflowContext,  codec_state: *mut c_void, *mut BitmapBgra) -> bool;
-
-
-type CodecWriteFrameFn = extern fn(*mut ImageflowContext,
-                                   codec_state: *mut libc::c_void,
-                                   *mut BitmapBgra,
-                                   *const EncoderHints)
-                                   -> bool;
-
-
-type CodecStringifyFn = extern fn(*mut ImageflowContext,
-                                   codec_state: *mut libc::c_void,
-                                   buffer: *mut libc::c_char, buffer_size: size_t)
-                                   -> bool;
-
-
-
-#[repr(C)]
-#[derive(Clone,Debug,PartialEq)]
-pub struct CodecDefinition {
-    pub codec_id: i64,
-    pub initialize: Option<CodecInitializeFn>,
-    pub get_info: Option<CodecGetInfoFn>,
-    pub get_frame_info: Option<CodecGetFrameInfoFn>,
-    pub set_downscale_hints: Option<CodecSetDownscaleHintsFn>,
-    pub switch_frame: Option<CodecSwitchFrameFn>,
-    pub read_frame: Option<CodecWriteFrameFn>,
-    pub write_frame: Option<CodecWriteFrameFn>,
-
-    pub stringify: Option<CodecStringifyFn>,
-    pub name: *const u8,
-    pub preferred_mime_type: *const u8,
-    pub preferred_extension: *const u8,
-}
-
-#[repr(C)]
-#[derive(Clone,Debug,PartialEq)]
-struct CodecDefinitionSet {
-    pub codecs: *const CodecDefinition,
-    pub count: size_t,
-}
-
-#[repr(C)]
-#[derive(Clone,Debug,PartialEq)]
-pub struct ContextCodecSet {
-    codecs: *mut CodecDefinition,
-    codecs_count: size_t,
-}
-
 
 #[repr(C)]
 #[derive(Clone,Debug,PartialEq)]
@@ -649,18 +581,6 @@ pub struct ProfilingLog {
     placeholder: u8, // FIXME: replace
 }
 
-
-
-#[repr(C)]
-#[derive(Copy,Clone,Debug,PartialEq)]
-pub enum CodecType {
-    Null = 0,
-    DecodePng = 1,
-    EncodePng = 2,
-    DecodeJpeg = 3,
-    EncodeJpeg = 4,
-    DecodeGif = 5,
-}
 
 
 #[repr(C)]
@@ -745,15 +665,6 @@ pub struct Scale2dRenderToCanvas1d {
     pub interpolation_filter: Filter,
     pub scale_in_colorspace: Floatspace,
 }
-#[repr(C)]
-#[derive(Clone,Debug,Copy)]
-pub struct RenderToCanvas1d {
-    // There will need to be consistency checks against the createcanvas node
-    pub interpolation_filter: Filter,
-    pub scale_to_width: i32,
-    pub transpose_on_write: bool,
-    pub scale_in_colorspace: Floatspace,
-}
 
 #[repr(C)]
 #[derive(Clone,Debug,Copy,  PartialEq)]
@@ -802,6 +713,15 @@ type WrapJpegSourceManagerFunc = extern fn(&mut mozjpeg_sys::jpeg_decompress_str
 type WrapJpegSourceManagerFillBufferFunc = extern fn(&mut mozjpeg_sys::jpeg_decompress_struct, *mut c_void, &mut bool) -> bool;
 type WrapJpegSourceManagerSkipBytesFunc = extern fn(&mut mozjpeg_sys::jpeg_decompress_struct, *mut c_void, c_long) -> bool;
 
+
+// typedef  bool (*wrap_png_custom_read_function) (png_structp png_ptr, void * custom_state, uint8_t * buffer, size_t bytes_requested, size_t * out_bytes_read);
+type WrapPngCustomReadFunction = extern fn(*mut c_void, *mut c_void, *mut u8, usize, &mut usize) -> bool;
+//typedef void (*wrap_png_error_handler) (png_structp png_ptr, void * custom_state, char * error_message);
+type WrapPngErrorHandler = extern fn(*mut c_void, *mut c_void, *const c_char);
+
+//typedef  bool (*wrap_png_custom_write_function) (png_structp png_ptr, void * custom_state, uint8_t * buffer, size_t buffer_length);
+type WrapPngCustomWriteFunction = extern fn(*mut c_void, *mut c_void, *mut u8, usize) -> bool;
+
 #[repr(C)]
 pub struct WrapJpegSourceManager {
     pub shared_mgr: mozjpeg_sys::jpeg_source_mgr,
@@ -825,42 +745,6 @@ mod long_term{
     use super::*;
     use ::libc;
     extern "C" {
-        pub fn flow_context_create() -> *mut ImageflowContext;
-        pub fn flow_context_begin_terminate(context: *mut ImageflowContext) -> bool;
-        pub fn flow_context_destroy(context: *mut ImageflowContext);
-        pub fn flow_destroy(context: *mut ImageflowContext,
-                            pointer: *const libc::c_void,
-                            file: *const libc::c_char,
-                            line: i32)
-                            -> bool;
-
-
-
-        pub fn flow_bitmap_bgra_flip_vertical(c: *mut ImageflowContext, bitmap: *mut BitmapBgra) -> bool;
-        pub fn flow_bitmap_bgra_flip_horizontal(c: *mut ImageflowContext, bitmap: *mut BitmapBgra) -> bool;
-
-        pub fn flow_bitmap_bgra_create(c: *mut ImageflowContext,
-                                       sx: i32,
-                                       sy: i32,
-                                       zeroed: bool,
-                                       format: PixelFormat)
-                                       -> *mut BitmapBgra;
-
-
-        pub fn flow_node_execute_scale2d_render1d(c: *mut ImageflowContext,
-                                                  input: *mut BitmapBgra,
-                                                  canvas: *mut BitmapBgra,
-                                                  info: *const Scale2dRenderToCanvas1d)
-                                                  -> bool;
-
-        pub fn flow_bitmap_bgra_fill_rect(c: *mut ImageflowContext,
-                                          input: *mut BitmapBgra,
-                                          x1: u32,
-                                          y1: u32,
-                                          x2: u32,
-                                          y2: u32,
-                                          color_srgb_argb: u32)
-                                          -> bool;
 
         pub fn wrap_jpeg_error_state_bytes() -> usize;
 
@@ -887,9 +771,38 @@ mod long_term{
 
         pub fn wrap_jpeg_read_scan_lines(codec_info: *mut ::mozjpeg_sys::jpeg_decompress_struct,
                                          scan_lines: *const *mut u8, max_scan_lines: u32,
-                                         scan_lines_read: * mut u32) -> bool;
+                                         scan_lines_read: *mut u32) -> bool;
 
         pub fn wrap_jpeg_save_markers(codec_info: *mut ::mozjpeg_sys::jpeg_decompress_struct, marker_code: i32, length_limit: u32) -> bool;
+
+        pub fn wrap_png_decoder_state_bytes() -> usize;
+
+        pub fn wrap_png_decoder_state_init(state: *mut c_void, custom_state: *mut c_void,
+                                           error_handler: WrapPngErrorHandler, read_function: WrapPngCustomReadFunction) -> bool;
+
+        pub fn wrap_png_decode_image_info(state: *mut c_void) -> bool;
+
+        pub fn wrap_png_decode_finish(state: *mut c_void, row_pointers: *mut *mut u8, row_count: usize, row_bytes: usize) -> bool;
+
+        pub fn wrap_png_decoder_get_png_ptr(state: *mut c_void) -> *mut c_void;
+
+        pub fn wrap_png_decoder_get_info_ptr(state: *mut c_void) -> *mut c_void;
+
+        pub fn wrap_png_decoder_get_color_info(state: *mut c_void) -> *const DecoderColorInfo;
+
+        pub fn wrap_png_decoder_destroy(state: *mut c_void) -> bool;
+
+        pub fn wrap_png_decoder_get_info(state: *mut c_void, w: &mut u32, h: &mut u32, uses_alpha: &mut bool) -> bool;
+
+        pub fn wrap_png_encoder_write_png(custom_state: *mut c_void,
+                                          error_handler: WrapPngErrorHandler,
+                                          write_function: WrapPngCustomWriteFunction,
+                                          row_pointers: *const *mut u8,
+                                          w: usize,
+                                          h: usize,
+                                          disable_png_alpha: bool,
+                                          zlib_compression_level: i32,
+                                          pixel_format: PixelFormat) -> bool;
     }
 }
 
@@ -898,16 +811,44 @@ mod mid_term {
     use ::libc;
 
     extern "C" {
+        pub fn flow_context_create() -> *mut ImageflowContext;
+        pub fn flow_context_begin_terminate(context: *mut ImageflowContext) -> bool;
+        pub fn flow_context_destroy(context: *mut ImageflowContext);
+        pub fn flow_destroy(context: *mut ImageflowContext,
+                            pointer: *const libc::c_void,
+                            file: *const libc::c_char,
+                            line: i32)
+                            -> bool;
 
+        pub fn flow_bitmap_bgra_flip_vertical(c: *mut ImageflowContext, bitmap: *mut BitmapBgra) -> bool;
+        pub fn flow_bitmap_bgra_flip_horizontal(c: *mut ImageflowContext, bitmap: *mut BitmapBgra) -> bool;
+
+        pub fn flow_bitmap_bgra_create(c: *mut ImageflowContext,
+                                       sx: i32,
+                                       sy: i32,
+                                       zeroed: bool,
+                                       format: PixelFormat)
+                                       -> *mut BitmapBgra;
+
+        pub fn flow_node_execute_scale2d_render1d(c: *mut ImageflowContext,
+                                                  input: *mut BitmapBgra,
+                                                  canvas: *mut BitmapBgra,
+                                                  info: *const Scale2dRenderToCanvas1d)
+                                                  -> bool;
+
+        pub fn flow_bitmap_bgra_fill_rect(c: *mut ImageflowContext,
+                                          input: *mut BitmapBgra,
+                                          x1: u32,
+                                          y1: u32,
+                                          x2: u32,
+                                          y2: u32,
+                                          color_srgb_argb: u32)
+                                          -> bool;
 
         pub fn flow_bitmap_bgra_save_png(c: *mut ImageflowContext,
                                          input: *const BitmapBgra,
                                          path: *const libc::c_char)
                                          -> bool;
-
-        pub fn flow_codecs_jpg_decoder_get_exif(context: *mut ImageflowContext,
-                                                codec_instance: *mut CodecInstance)
-                                                -> i32;
 
         pub fn flow_context_has_error(context: *mut ImageflowContext) -> bool;
         pub fn flow_context_clear_error(context: *mut ImageflowContext);
@@ -917,7 +858,6 @@ mod mid_term {
                                                  full_file_path: bool)
                                                  -> i64;
 
-
         pub fn flow_context_print_and_exit_if_err(context: *mut ImageflowContext) -> bool;
 
         pub fn flow_context_error_reason(context: *mut ImageflowContext) -> i32;
@@ -925,30 +865,17 @@ mod mid_term {
         pub fn flow_context_error_status_included_in_message(context: *mut ImageflowContext) -> bool;
 
         pub fn flow_context_set_error_get_message_buffer_info(context: *mut ImageflowContext,
-                                                     code: i32,
+                                                              code: i32,
                                                               status_included_in_buffer: bool,
-                                                     buffer_out: *mut *mut u8,
-                                                     buffer_size_out: *mut libc::size_t)
-                                                     -> bool;
-
-
-        pub fn flow_context_raise_error(context: *mut ImageflowContext,
-                                        error_code: i32,
-                                        message: *const libc::c_char,
-                                        file: *const libc::c_char,
-                                        line: i32,
-                                        function_name: *const libc::c_char)
-                                        -> bool;
-
+                                                              buffer_out: *mut *mut u8,
+                                                              buffer_size_out: *mut libc::size_t)
+                                                              -> bool;
 
         pub fn flow_context_add_to_callstack(context: *mut ImageflowContext,
                                              file: *const libc::c_char,
                                              line: i32,
                                              function_name: *const libc::c_char)
                                              -> bool;
-
-
-
 
         pub fn flow_context_calloc(context: *mut ImageflowContext,
                                    instance_count: usize,
@@ -959,13 +886,6 @@ mod mid_term {
                                    line: i32)
                                    -> *mut libc::c_void;
 
-
-        pub fn flow_io_create_for_file(context: *mut ImageflowContext,
-                                       mode: IoMode,
-                                       filename: *const libc::c_char,
-                                       owner: *const libc::c_void)
-                                       -> *mut ImageflowJobIo;
-
         pub fn flow_io_create_from_memory(context: *mut ImageflowContext,
                                           mode: IoMode,
                                           memory: *const u8,
@@ -973,7 +893,11 @@ mod mid_term {
                                           owner: *const libc::c_void,
                                           destructor_function: *const libc::c_void)
                                           -> *mut ImageflowJobIo;
-
+        pub fn flow_io_create_for_file(context: *mut ImageflowContext,
+                                       mode: IoMode,
+                                       filename: *const libc::c_char,
+                                       owner: *const libc::c_void)
+                                       -> *mut ImageflowJobIo;
         pub fn flow_io_create_for_output_buffer(context: *mut ImageflowContext,
                                                 owner: *const libc::c_void)
                                                 -> *mut ImageflowJobIo;
@@ -987,41 +911,17 @@ mod mid_term {
                                          result_buffer_length: *mut libc::size_t)
                                          -> bool;
 
-
-
-        pub fn flow_codec_initialize(c: *mut ImageflowContext, instance: *mut CodecInstance) -> bool;
-
-        pub fn flow_codec_get_definition(c: *mut ImageflowContext,
-                                         codec_id: i64)
-                                         -> *mut CodecDefinition;
-
-        pub fn flow_codec_execute_read_frame(c: *mut ImageflowContext,
-                                             instance: *mut CodecInstance, color_info: *mut DecoderColorInfo)
-                                             -> *mut BitmapBgra;
-
-
-        pub fn flow_codec_decoder_get_info(c: *mut ImageflowContext,
-                                           codec_state: *mut libc::c_void, codec_id: i64, info: *mut DecoderInfo) -> bool;
-
-        pub fn flow_codec_decoder_set_downscale_hints(c: *mut ImageflowContext,
-                                                      instance: *mut CodecInstance, hints: *const DecoderDownscaleHints, crash_if_not_implemented: bool) -> bool;
-
-
         pub fn flow_bitmap_bgra_populate_histogram(c: *mut ImageflowContext, input: *mut BitmapBgra, histograms: *mut u64, histogram_size_per_channel: u32, histogram_count: u32, pixels_sampled: *mut u64) -> bool;
         pub fn flow_bitmap_bgra_apply_color_matrix(c: *mut ImageflowContext, input: *mut BitmapBgra, row: u32, count: u32, matrix: *const *const f32) -> bool;
 
         pub fn flow_bitmap_bgra_transpose(c: *mut ImageflowContext, input: *mut BitmapBgra, output: *mut BitmapBgra) -> bool;
-
-
-    pub fn flow_bitmap_bgra_write_png_with_hints(c: *mut ImageflowContext, input: *mut BitmapBgra, io: *mut ImageflowJobIo, hints: *const EncoderHints) -> bool;
-
-}
+    }
 }
 
 pub use self::must_replace::*;
 pub use self::long_term::*;
 pub use self::mid_term::*;
-
+use std::os::raw::c_char;
 
 
 // https://github.com/rust-lang/rust/issues/17417
